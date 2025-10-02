@@ -33,6 +33,10 @@
   }
 
   /* ========== DOM references ========== */
+  const overlayCanvas = $('#overlayCanvas');
+  const cameraContainer = $('#cameraContainer');
+  let faceMesh; // Biến cho mô hình MediaPipe
+  let cameraLoopId; // Biến để điều khiển vòng lặp camera vẽ lưới
   const openVipModalBtn = $('#openVipModalBtn');
   const vipModal = $('#vipModal');
   const closeVipModalBtn = $('#closeVipModalBtn');
@@ -81,6 +85,34 @@
   // **THÊM MỚI**: DOM references cho Chat Bubble
 const chatBubble = $('#chatBubble');
 const chatModal = $('#chatModal');
+// --- KHỞI TẠO MEDIAPIPE FACEMESH ---
+function onResults(results) {
+  const ctx = overlayCanvas.getContext('2d');
+  ctx.save();
+  ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+  // Vẽ lưới lên khuôn mặt nếu tìm thấy
+  if (results.multiFaceLandmarks) {
+    for (const landmarks of results.multiFaceLandmarks) {
+      // Vẽ các đường nối (mạng lưới)
+      drawConnectors(ctx, landmarks, FACEMESH_TESSELATION, {color: 'rgba(124, 92, 255, 0.4)', lineWidth: 1});
+    }
+  }
+  ctx.restore();
+}
+
+// Cấu hình mô hình
+faceMesh = new FaceMesh({locateFile: (file) => {
+  return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+}});
+faceMesh.setOptions({
+  maxNumFaces: 1,
+  refineLandmarks: true,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+faceMesh.onResults(onResults);
+// --- KẾT THÚC PHẦN KHỞI TẠO ---
 
   /* ========== UI helpers ========== */
   function setChatStatus(text) {
@@ -345,102 +377,106 @@ vipModal.addEventListener('click', (e) => {
   });
 
   /* ========== Camera & Real-time AI analysis ========== */
-  // **TOÀN BỘ PHẦN CODE ĐỂ TÍCH HỢP CAMERA SẼ NẰM Ở ĐÂY**
+  // DÁN TOÀN BỘ KHỐI CODE NÀY VÀO FILE app.js
 
-  let stream; // Biến để lưu luồng video từ camera
-  let analysisInterval; // Biến để lặp lại việc phân tích
+let stream; // Biến để lưu luồng video từ camera
+let analysisInterval; // Biến để lặp lại việc phân tích cảm xúc
+let isCameraActive = false; // Biến trạng thái camera
 
-  // Bản đồ cảm xúc để hiển thị kết quả từ Python backend
-  const emotionMap = {
-    happy: { icon: '😊', vi: 'Vui vẻ' },
-    sad: { icon: '😢', vi: 'Buồn' },
-    angry: { icon: '😠', vi: 'Tức giận' },
-    surprise: { icon: '😮', vi: 'Ngạc nhiên' },
-    fear: { icon: '😨', vi: 'Lo lắng' },
-    neutral: { icon: '😐', vi: 'Bình tĩnh' },
-    disgust: { icon: '🤢', vi: 'Ghê tởm' }
-  };
+// **ĐÃ THÊM VÀO ĐÂY**
+// Bản đồ cảm xúc để hiển thị kết quả từ Python backend
+const emotionMap = {
+  happy: { icon: '😊', vi: 'Vui vẻ' },
+  sad: { icon: '😢', vi: 'Buồn' },
+  angry: { icon: '😠', vi: 'Tức giận' },
+  surprise: { icon: '😮', vi: 'Ngạc nhiên' },
+  fear: { icon: '😨', vi: 'Lo lắng' },
+  neutral: { icon: '😐', vi: 'Bình tĩnh' },
+  disgust: { icon: '🤢', vi: 'Ghê tởm' }
+};
 
-  // Xử lý sự kiện khi nhấn nút Bật/Tắt Camera
-  if (startCamBtn) {
-    startCamBtn.addEventListener('click', async () => {
-      if (stream) { // Nếu camera đang bật -> tắt nó đi
+// Xử lý sự kiện khi nhấn nút Bật/Tắt Camera
+startCamBtn.addEventListener('click', async () => {
+  if (isCameraActive) { // Nếu camera đang bật -> tắt nó đi
+    isCameraActive = false;
+    if (stream) {
         stream.getTracks().forEach(track => track.stop());
-        webcam.style.display = 'none';
-        stream = null;
-        startCamBtn.textContent = 'Bật Camera';
-        clearInterval(analysisInterval);
-        setChatStatus('Ready');
-      } else { // Nếu camera đang tắt -> bật nó lên
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({ video: true });
-          webcam.srcObject = stream;
-          webcam.style.display = 'block';
-          startCamBtn.textContent = 'Tắt Camera';
-          // Bắt đầu phân tích sau mỗi 2.5 giây
-          analysisInterval = setInterval(analyzeFrame, 1000);
-        } catch (err) {
-          console.error("Lỗi bật camera:", err);
-          showToast("Không thể truy cập camera. Vui lòng cấp quyền.");
-        }
-      }
-    });
-  }
-
-  // Hàm chụp khung hình và gửi đến backend Python để phân tích
-  async function analyzeFrame() {
-    if (!stream) return;
-
-    // Vẽ frame từ video vào canvas ẩn
-    canvas.width = webcam.videoWidth;
-    canvas.height = webcam.videoHeight;
-    const context = canvas.getContext('2d');
-    context.drawImage(webcam, 0, 0, canvas.width, canvas.height);
-    const imageData = canvas.toDataURL('image/jpeg');
-
-    setChatStatus('Đang phân tích...');
+    }
+    cameraContainer.style.display = 'none';
+    startCamBtn.textContent = 'Bật Camera';
+    clearInterval(analysisInterval);
+    cancelAnimationFrame(cameraLoopId);
+  } else { // Nếu camera đang tắt -> bật nó lên
     try {
-      // Gửi ảnh đến backend Python
-      const response = await fetch('http://127.0.0.1:5000/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: imageData }),
-      });
-
-      if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
-
-      const result = await response.json(); // Nhận kết quả { emotion_en: 'happy', emotion_vi: 'Vui vẻ' }
+      stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      webcam.srcObject = stream;
       
-      // Sử dụng các hàm có sẵn để hiển thị kết quả và lưu lịch sử
-      if (result && result.emotion_en) {
-          const emotionData = emotionMap[result.emotion_en] || { icon: '🤷‍♂️', vi: result.emotion_vi };
-          
-          const resultObj = {
-              id: 'cam-' + Date.now(),
-              type: 'camera',
-              inputName: 'Camera trực tiếp',
-              ts: Date.now(),
-              emotions: [{
-                  name: emotionData.vi,
-                  emoji: emotionData.icon,
-                  confidence: 90 // Giả định độ tin cậy
-              }]
-          };
+      webcam.onloadedmetadata = () => {
+        // Cập nhật kích thước canvas cho khớp với video
+        overlayCanvas.width = webcam.videoWidth;
+        overlayCanvas.height = webcam.videoHeight;
+        
+        isCameraActive = true;
+        cameraContainer.style.display = 'block';
+        startCamBtn.textContent = 'Tắt Camera';
 
-          displayResult(resultObj); // Dùng hàm hiển thị kết quả có sẵn
-          const hist = loadHistoryArray();
-          saveHistoryArray([resultObj].concat(hist)); // Dùng hàm lưu lịch sử có sẵn
-          renderHistory(); // Dùng hàm render lịch sử có sẵn
-      }
-      setChatStatus('Ready');
-    } catch (error) {
-      console.error('Lỗi khi phân tích camera frame:', error);
-      setChatStatus('Lỗi kết nối');
-      // Dừng phân tích nếu có lỗi (ví dụ: server python chưa chạy)
-      clearInterval(analysisInterval);
-      showToast('Lỗi kết nối tới server AI. Vui lòng kiểm tra lại.');
+        // Bắt đầu cả 2 tác vụ: phân tích cảm xúc và vẽ lưới
+        analysisInterval = setInterval(analyzeFrameForEmotion, 2500); // Phân tích cảm xúc mỗi 2.5s
+        cameraLoopForMesh(); // Bắt đầu vẽ lưới
+      };
+    } catch (err) {
+      console.error("Lỗi bật camera:", err);
+      showToast("Không thể truy cập camera. Vui lòng cấp quyền.");
     }
   }
+});
+
+// Vòng lặp để gửi video cho MediaPipe và VẼ LƯỚI
+async function cameraLoopForMesh() {
+  if (!isCameraActive) return;
+  await faceMesh.send({image: webcam});
+  cameraLoopId = requestAnimationFrame(cameraLoopForMesh);
+}
+
+// Hàm chụp khung hình và gửi đến backend để PHÂN TÍCH CẢM XÚC
+async function analyzeFrameForEmotion() {
+  if (!isCameraActive) return;
+
+  const context = canvas.getContext('2d');
+  canvas.width = webcam.videoWidth;
+  canvas.height = webcam.videoHeight;
+  context.drawImage(webcam, 0, 0, canvas.width, canvas.height);
+  const imageData = canvas.toDataURL('image/jpeg');
+
+  // Phần code fetch đến backend Python giữ nguyên như cũ
+  try {
+    const response = await fetch('http://127.0.0.1:5000/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: imageData }),
+    });
+
+    if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
+    const result = await response.json();
+
+    if (result && result.emotion_vi) {
+      const emotionData = emotionMap[result.emotion_en] || { icon: '😐', vi: result.emotion_vi };
+      const resultObj = {
+        id: 'cam-' + Date.now(),
+        type: 'camera',
+        inputName: 'Camera trực tiếp',
+        ts: Date.now(),
+        emotions: [{ name: emotionData.vi, emoji: emotionData.icon, confidence: 90 }]
+      };
+      displayResult(resultObj);
+      const hist = loadHistoryArray();
+      saveHistoryArray([resultObj].concat(hist));
+      renderHistory();
+    }
+  } catch (error) {
+    console.error('Lỗi khi phân tích camera frame:', error);
+  }
+}
 
 
   /* ========== Chat functionality (KHÔNG THAY ĐỔI) ========== */
@@ -961,7 +997,7 @@ function displayResult(resultObj) {
   const nod = document.createElement('div');
   nod.className = 'emotion-card card';
   nod.innerHTML = `
-    <div class="emotion-icon">${resultObj.emoji || '🤔'}</div>
+    <div class="emotion-icon">${(resultObj.emotions && resultObj.emotions[0]?.emoji) || resultObj.emoji || '🤔'}</div>
     <div class="result-text-content">
       <div class="result-title">Phân Tích Từ AI</div>
       <div class="result-subtitle">${resultObj.inputName}</div>
@@ -1016,7 +1052,7 @@ function displayActionTips(resultObj) {
       item.style.alignItems = 'center';
       const left = document.createElement('div');
       left.innerHTML = `<div style="font-weight:700">${it.type.toUpperCase()} ${it.inputName ? '• ' + it.inputName : ''}</div>
-                       <div class="muted small">${it.type === 'chat' ? it.input : (it.emotions && it.emotions[0] ? it.emotions[0].name : '')}</div>`;
+                  <div class="muted small">${it.type === 'chat' ? it.input : (it.emotions && it.emotions[0] ? `${it.emotions[0].emoji} ${it.emotions[0].name}` : '')}</div>`;
       const right = document.createElement('div');
       right.className = 'muted small';
       right.textContent = fmtTime(it.ts);
@@ -1052,56 +1088,48 @@ function displayActionTips(resultObj) {
 
 // 1. Logic Mở/Đóng cửa sổ Chat
 chatBubble.addEventListener('click', (event) => {
-    if (chatBubble.isDragging) {
-        chatBubble.isDragging = false;
-        return;
+    if (chatBubble.isDragging) { return; }
+
+    const bubbleRect = chatBubble.getBoundingClientRect();
+    
+    // Logic mới: Kiểm tra xem bubble đang ở nửa trên hay nửa dưới màn hình
+    if (bubbleRect.top < (window.innerHeight / 2)) {
+        // NẾU Ở NỬA TRÊN: Mở cửa sổ chat BÊN DƯỚI bubble
+        chatModal.style.top = (bubbleRect.bottom + 10) + 'px';
+        chatModal.style.bottom = 'auto';
+    } else {
+        // NẾU Ở NỬA DƯỚI: Mở cửa sổ chat BÊN TRÊN bubble
+        chatModal.style.bottom = (window.innerHeight - bubbleRect.top + 10) + 'px';
+        chatModal.style.top = 'auto';
     }
 
-    // Tính toán vị trí của cửa sổ chat trước khi hiện
-    const bubbleRect = chatBubble.getBoundingClientRect();
-    const modalRect = chatModal.getBoundingClientRect();
-
-    // Mặc định căn theo bottom
-    chatModal.style.bottom = (window.innerHeight - bubbleRect.bottom) + 'px';
-
-    // Nếu bubble ở nửa trái màn hình -> mở chat bên phải
+    // Logic căn trái/phải giữ nguyên
     if (bubbleRect.left < (window.innerWidth / 2)) {
-        chatModal.style.left = (bubbleRect.right + 15) + 'px';
+        chatModal.style.left = bubbleRect.left + 'px';
         chatModal.style.right = 'auto';
-    } else { // Nếu bubble ở nửa phải màn hình -> mở chat bên trái
-        chatModal.style.right = (window.innerWidth - bubbleRect.left + 15) + 'px';
+    } else {
+        chatModal.style.right = (window.innerWidth - bubbleRect.right) + 'px';
         chatModal.style.left = 'auto';
     }
 
     chatModal.classList.toggle('visible');
 });
 
-// 2. Logic Kéo-Thả (Draggable)
+// Hàm xử lý logic Kéo-Thả (Draggable)
 function makeDraggable(element) {
   let pos1 = 0, pos2 = 0, pos3 = 0, pos4 = 0;
-
   element.onmousedown = dragMouseDown;
-  element.isDragging = false; // Biến để kiểm tra xem có đang kéo không
+  element.isDragging = false;
 
   function dragMouseDown(e) {
     e.preventDefault();
     chatModal.classList.remove('visible');
+    element.style.transition = 'none';
     pos3 = e.clientX;
     pos4 = e.clientY;
     document.onmouseup = closeDragElement;
     document.onmousemove = elementDrag;
   }
-  // THÊM MỚI: Tự động đóng cửa sổ chat khi click ra ngoài
-window.addEventListener('click', function(e) {
-  // Kiểm tra xem cửa sổ chat có đang hiện không
-  if (chatModal.classList.contains('visible')) {
-    // Nếu điểm click không nằm trong cửa sổ chat VÀ không phải là bong bóng chat
-    if (!chatModal.contains(e.target) && !chatBubble.contains(e.target)) {
-      // Thì đóng cửa sổ chat
-      chatModal.classList.remove('visible');
-    }
-  }
-});
 
   function elementDrag(e) {
     e.preventDefault();
@@ -1110,104 +1138,112 @@ window.addEventListener('click', function(e) {
     pos2 = pos4 - e.clientY;
     pos3 = e.clientX;
     pos4 = e.clientY;
-
     let newTop = element.offsetTop - pos2;
     let newLeft = element.offsetLeft - pos1;
-
-    // Giới hạn không cho kéo ra ngoài màn hình
-    const screenPadding = 10;
-    newTop = Math.max(screenPadding, Math.min(newTop, window.innerHeight - element.offsetHeight - screenPadding));
-    newLeft = Math.max(screenPadding, Math.min(newLeft, window.innerWidth - element.offsetWidth - screenPadding));
-
+    const padding = 10;
+    newTop = Math.max(padding, Math.min(newTop, window.innerHeight - element.offsetHeight - padding));
+    newLeft = Math.max(padding, Math.min(newLeft, window.innerWidth - element.offsetWidth - padding));
     element.style.top = newTop + "px";
     element.style.left = newLeft + "px";
   }
 
- function closeDragElement() {
+  // THAY THẾ TOÀN BỘ HÀM closeDragElement CŨ BẰNG HÀM NÀY
+function closeDragElement() {
   document.onmouseup = null;
   document.onmousemove = null;
 
-  // Logic bám vào cạnh màn hình
-  const bubbleCenter = element.offsetLeft + element.offsetWidth / 2;
-  if (bubbleCenter < window.innerWidth / 2) {
-    // Bám vào cạnh trái
-    element.style.left = "20px";
+  // SỬA LẠI: Hiệu ứng transition giờ sẽ áp dụng cho cả chiều dọc (top) và ngang (left)
+  element.style.transition = 'top 500ms ease-out, left 500ms ease-out';
+
+  // === LOGIC MỚI: BÁM VÀO 4 GÓC MÀN HÌNH ===
+  const bubbleCenterX = element.offsetLeft + element.offsetWidth / 2;
+  const bubbleCenterY = element.offsetTop + element.offsetHeight / 2;
+  const windowCenterX = window.innerWidth / 2;
+  const windowCenterY = window.innerHeight / 2;
+  const padding = 20; // Khoảng cách tới mép màn hình
+
+  let targetTop = 0;
+  let targetLeft = 0;
+
+  // Xác định góc trên hay dưới
+  if (bubbleCenterY < windowCenterY) {
+    targetTop = padding; // Góc trên
   } else {
-    // Bám vào cạnh phải
-    element.style.left = (window.innerWidth - element.offsetWidth - 20) + "px";
+    targetTop = window.innerHeight - element.offsetHeight - padding; // Góc dưới
   }
 
-  setTimeout(() => {
-      element.isDragging = false;
-  }, 0);
+  // Xác định góc trái hay phải
+  if (bubbleCenterX < windowCenterX) {
+    targetLeft = padding; // Góc trái
+  } else {
+    targetLeft = window.innerWidth - element.offsetWidth - padding; // Góc phải
+  }
+
+  // Di chuyển bubble đến góc đã xác định
+  element.style.top = targetTop + 'px';
+  element.style.left = targetLeft + 'px';
+
+  setTimeout(() => { element.isDragging = false; }, 0);
 }
 }
-// THÊM MỚI: Tự động đóng cửa sổ chat khi click ra ngoài
+
+// Hàm xử lý logic tự động đóng cửa sổ chat khi click ra ngoài
 window.addEventListener('click', function(e) {
-  // Chỉ kiểm tra nếu cửa sổ chat đang được hiển thị
   if (chatModal.classList.contains('visible')) {
-    
-    // Nếu vị trí click nằm ngoài cửa sổ chat VÀ cũng nằm ngoài bong bóng chat
     if (!chatModal.contains(e.target) && !chatBubble.contains(e.target)) {
-      
-      // Thì ẩn cửa sổ chat đi
       chatModal.classList.remove('visible');
     }
   }
 });
-  /* ========== Initialization (KHÔNG THAY ĐỔI) ========== */
-  function init() {
-    setChatStatus('Ready');
-    renderHistory();
-    // If messages area empty, show a friendly prompt
-    if (messagesEl.children.length === 0) {
-      appendMessage('assistant', 'Chào bạn! Mình là SoulLens (demo). Gõ vài dòng để mình lắng nghe nhé — mình sẽ trả lời bằng những lời thân thiện, như một người bạn đồng hành.');
-    }
-    
- }   
-// Tự động hiện tin nhắn chào mừng sau 1.5 giây
-    setTimeout(() => {
-      const bubbleRect = chatBubble.getBoundingClientRect();
-      
-      // Tính toán vị trí cho tin nhắn
-      welcomeToast.style.top = (bubbleRect.top + (bubbleRect.height / 2) - 18) + 'px';
 
-      // Quyết định hiện tin nhắn bên trái hay phải của bubble
-      if (bubbleRect.left < (window.innerWidth / 2)) { // Bubble bên trái -> tin nhắn hiện bên phải
-        welcomeToast.style.left = (bubbleRect.right + 15) + 'px';
-        welcomeToast.style.right = 'auto';
-        
-        // SỬA LỖI: Đuôi phải chỉ sang trái -> dùng class on-right
-        welcomeToast.classList.add('on-right');
-        welcomeToast.classList.remove('on-left');
-      } else { // Bubble bên phải -> tin nhắn hiện bên trái
-        // Chỗ này cần tính toán lại 1 chút để không bị tràn màn hình
-        welcomeToast.style.left = (bubbleRect.left - welcomeToast.offsetWidth - 15) + 'px';
-        welcomeToast.style.right = 'auto';
 
-        // SỬA LỖI: Đuôi phải chỉ sang phải -> dùng class on-left
-        welcomeToast.classList.add('on-left');
-        welcomeToast.classList.remove('on-right');
-      }
+/* ========== Initialization ========== */
+function init() {
+  setChatStatus('Ready');
+  renderHistory();
+  if (messagesEl.children.length === 0) {
+    appendMessage('assistant', 'Chào bạn! Mình là SoulLens (demo). Gõ vài dòng để mình lắng nghe nhé — mình sẽ trả lời bằng những lời thân thiện, như một người bạn đồng hành.');
+  }
 
-      welcomeToast.classList.add('visible');
-      
-      // Tự động ẩn đi sau 5 giây
-      setTimeout(() => {
-        welcomeToast.classList.remove('visible');
-      }, 5000);
+  // Kích hoạt chức năng kéo-thả
+  makeDraggable(chatBubble);
+  
+  // Tự động hiện tin nhắn chào mừng sau 1 giây
+// THAY THẾ TOÀN BỘ KHỐI setTimeout CŨ BẰNG KHỐI NÀY
+setTimeout(() => {
+  const bubbleRect = chatBubble.getBoundingClientRect();
+  
+  // Luôn căn giữa theo chiều dọc của bubble
+  welcomeToast.style.top = (bubbleRect.top + (bubbleRect.height / 2) - welcomeToast.offsetHeight / 2) + 'px';
 
-    }, 1500);
-  init();
+  // **LOGIC MỚI: Luôn luôn hiển thị bên phải**
+  welcomeToast.style.left = (bubbleRect.right + 15) + 'px';
+  welcomeToast.style.right = 'auto';
+  
+  // Luôn dùng class 'on-right' cho đuôi tam giác và xóa các class khác
+  welcomeToast.classList.add('on-right');
+  welcomeToast.classList.remove('on-left', 'on-top', 'on-bottom');
 
-  // Expose a few helpers to global for debug if needed
-  window.soullens = {
-    generateSoulResponse,
-    analyzeImageData,
-    computeRMS,
-    computeZCR,
-    loadHistoryArray,
-    saveHistoryArray
-  };
+  welcomeToast.classList.add('visible');
+  
+  // Tự động ẩn đi sau 5 giây
+  setTimeout(() => {
+    welcomeToast.classList.remove('visible');
+  }, 5000);
+
+}, 1000);
+}
+
+init();
+
+// Expose a few helpers to global for debug if needed
+window.soullens = {
+  generateSoulResponse,
+  analyzeImageData,
+  computeRMS,
+  computeZCR,
+  loadHistoryArray,
+  saveHistoryArray
+};
 
 })();

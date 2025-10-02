@@ -11,8 +11,6 @@ from dotenv import load_dotenv # THÊM MỚI
 # --- PHẦN THIẾT LẬP MỚI CHO CHATGPT ---
 # Tải các biến môi trường từ file .env (chứa OPENAI_API_KEY)
 load_dotenv()
-
-# Khởi tạo Flask app và cho phép Cross-Origin Resource Sharing (CORS)
 app = Flask(__name__)
 CORS(app)
 
